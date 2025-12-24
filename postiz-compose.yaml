@@ -1,0 +1,57 @@
+services:
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: postiz
+    security_opt:
+      - no-new-privileges:true
+    restart: always
+    env_file: 
+      - path: ./default.env
+        required: true
+      - path: ./secrets.env
+        required: true
+    environment:
+      IS_GENERAL: "true"
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+    volumes:
+      - ./config:/config/
+      - ./uploads:/uploads/
+    networks:
+      - traefik-public
+      - postiz-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.postiz-secure.entrypoints=websecure"
+      - "traefik.http.routers.postiz-secure.rule=Host(`${MAIN_URL}`)"
+      - "traefik.http.routers.postiz-secure.tls=true"
+      - "traefik.http.routers.postiz-secure.tls.certresolver=${CERT_RESOLVER}"
+      - "traefik.http.routers.postiz-secure.service=postiz"
+      - "traefik.http.services.postiz.loadbalancer.server.port=5000"
+    depends_on:
+      postiz-redis:
+        condition: service_healthy
+
+  postiz-redis:
+    image: redis:7.2
+    container_name: postiz-redis
+    restart: always
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - ./redis:/data
+    networks:
+      - postiz-network
+ 
+networks:
+  traefik-public:
+    external: true
+  mariadb-network:
+    external: true
+  postiz-network:
+    external: false
