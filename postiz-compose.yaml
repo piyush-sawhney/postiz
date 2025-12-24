@@ -21,7 +21,7 @@ services:
     networks:
       - traefik-public
       - postiz-network
-      - mariadb-network
+      - postgres-network
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-public"
@@ -52,7 +52,7 @@ services:
 networks:
   traefik-public:
     external: true
-  mariadb-network:
+  postgres-network:
     external: true
   postiz-network:
     external: false
