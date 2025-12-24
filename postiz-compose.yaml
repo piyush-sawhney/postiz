@@ -26,9 +26,9 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-public"
       - "traefik.http.routers.postiz-secure.entrypoints=websecure"
-      - "traefik.http.routers.postiz-secure.rule=Host(`${MAIN_URL}`)"
+      - "traefik.http.routers.postiz-secure.rule=Host(`${POSTIZ_DOMAIN?POSTIZ_DOMAIN is not set}`)"
       - "traefik.http.routers.postiz-secure.tls=true"
-      - "traefik.http.routers.postiz-secure.tls.certresolver=${CERT_RESOLVER}"
+      - "traefik.http.routers.postiz-secure.tls.certresolver=${CERT_RESOLVER?CERT_RESOLVER is not set}"
       - "traefik.http.routers.postiz-secure.service=postiz"
       - "traefik.http.services.postiz.loadbalancer.server.port=5000"
     depends_on:
