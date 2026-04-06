@@ -10,88 +10,61 @@ services:
       - "traefik.http.routers.postiz.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.services.postiz.loadbalancer.server.port=5000"
     environment:
-      # === Required Settings
       MAIN_URL: 'https://${TRAEFIK_POSTIZ_HOST}'
       FRONTEND_URL: 'https://${TRAEFIK_POSTIZ_HOST}'
       NEXT_PUBLIC_BACKEND_URL: 'https://${TRAEFIK_POSTIZ_HOST}/api'
       JWT_SECRET: '${JWT_SECRET}'
-      DATABASE_URL: 'postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postiz-postgres:5432/${POSTGRES_DB}'
+      # Note: Ensure DB_PASSWORD is URL-encoded if it has special chars
+      DATABASE_URL: "postgresql://{{ postgres_user }}:{{ postgres_password | urlencode }}@postiz-postgres:5432/{{ postgres_db }}"
       REDIS_URL: 'redis://postiz-redis:6379'
-      BACKEND_INTERNAL_URL: 'http://postiz:5000' # Aligned Port
+      BACKEND_INTERNAL_URL: 'http://localhost:3000'
       TEMPORAL_ADDRESS: "temporal:7233"
       IS_GENERAL: 'true'
-      DISABLE_REGISTRATION: 'true' 
+      DISABLE_REGISTRATION: 'false'
       RUN_CRON: 'true'
-
-      # === Storage Settings
       STORAGE_PROVIDER: 'local'
       UPLOAD_DIRECTORY: '/uploads'
       NEXT_PUBLIC_UPLOAD_DIRECTORY: '/uploads'
-
-      # === Social Media API Settings
-      X_API_KEY: '${X_API_KEY}'
-      X_API_SECRET: '${X_API_SECRET}'
-      LINKEDIN_CLIENT_ID: '${LINKEDIN_CLIENT_ID}'
-      LINKEDIN_CLIENT_SECRET: '${LINKEDIN_CLIENT_SECRET}'
-      FACEBOOK_APP_ID: '${FACEBOOK_APP_ID}'
-      FACEBOOK_APP_SECRET: '${FACEBOOK_APP_SECRET}'
-      YOUTUBE_CLIENT_ID: '${YOUTUBE_CLIENT_ID}'
-      YOUTUBE_CLIENT_SECRET: '${YOUTUBE_CLIENT_SECRET}'
-
-      # === Chrome Extension Settings
-      EXTENSION_ID: 'icpokdlcikdmemjkeoojhocmhmehpaia'
-
-      # === Misc Settings
+      X_API_KEY: ${X_API_KEY}
+      X_API_SECRET: ${X_API_SECRET}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET}
+      YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID}
+      YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET}
       API_LIMIT: 30
-      NX_ADD_PLUGINS: false
-
+      NX_ADD_PLUGINS: "false"
     volumes:
-      - ./data/config:/config/
-      - ./data/uploads:/uploads/
+      - postiz-config:/config/
+      - postiz-uploads:/uploads/
     networks:
-      - public-proxy
-      - app-internal
-      - temporal-internal
+      - postiz-network
+      - temporal-network
+      - traefik-public
     depends_on:
       postiz-postgres:
         condition: service_healthy
       postiz-redis:
         condition: service_healthy
-      temporal:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
   postiz-postgres:
-    image: postgres:16-alpine # Standardized Version
+    image: postgres:17-alpine
     container_name: postiz-postgres
     restart: always
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_DB: ${DB_NAME}
     volumes:
       - postiz-db-data:/var/lib/postgresql/data
     networks:
-      - app-internal
+      - postiz-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
+      timeout: 3s
+      retries: 3
 
   postiz-redis:
     image: redis:7.2-alpine
@@ -100,125 +73,94 @@ services:
     volumes:
       - postiz-redis-data:/data
     networks:
-      - app-internal
+      - postiz-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
+      retries: 5
 
+  # -----------------------
+  # Temporal Stack
+  # -----------------------
   temporal-elasticsearch:
-    image: elasticsearch:8.17.0
     container_name: temporal-elasticsearch
+    image: elasticsearch:7.17.27
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=true
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - xpack.license.self_generated.type=basic
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
-      - cluster.routing.allocation.disk.threshold_enabled=true
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    networks:
+      - temporal-network
     volumes:
       - temporal-es-data:/usr/share/elasticsearch/data
-    networks:
-      - temporal-internal
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'status.*green\\|yellow'"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
 
   temporal-postgresql:
-    image: postgres:16-alpine
     container_name: temporal-postgresql
+    image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD}
-      POSTGRES_USER: ${TEMPORAL_DB_USER}
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD}
+      POSTGRES_USER: ${TEMPORAL_POSTGRES_USER}
+      POSTGRES_DB: temporal
+    networks:
+      - temporal-network
     volumes:
       - temporal-db-data:/var/lib/postgresql/data
-    networks:
-      - temporal-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${TEMPORAL_DB_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${TEMPORAL_POSTGRES_USER} -d temporal"]
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
 
   temporal:
-    image: temporalio/auto-setup:1.24.2 # Pinned Stable
     container_name: temporal
+    image: temporalio/auto-setup:1.28.1
     depends_on:
       temporal-postgresql:
         condition: service_healthy
       temporal-elasticsearch:
-        condition: service_healthy
+        condition: service_started
     environment:
       - DB=postgres12
-      - POSTGRES_USER=${TEMPORAL_DB_USER}
-      - POSTGRES_PWD=${TEMPORAL_DB_PASSWORD}
+      - DB_PORT=5432
+      - POSTGRES_USER=${TEMPORAL_POSTGRES_USER}
+      - POSTGRES_PWD=${TEMPORAL_POSTGRES_PASSWORD}
       - POSTGRES_SEEDS=temporal-postgresql
-      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/production-sql.yaml # Production Config
+      - VISIBILITY_DB=postgres12 # CRITICAL: Added for flawless auto-setup
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/production-sql.yaml
       - ENABLE_ES=true
       - ES_SEEDS=temporal-elasticsearch
       - ES_VERSION=v7
       - TEMPORAL_NAMESPACE=default
     networks:
-      - temporal-internal
-    healthcheck:
-      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep SERVING"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
+      - temporal-network
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig:ro
 
   temporal-ui:
-    image: temporalio/ui:2.27.0
     container_name: temporal-ui
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.temporal-ui.rule=Host(`${TRAEFIK_TEMPORAL_HOST}`)"
-      - "traefik.http.routers.temporal-ui.entrypoints=websecure"
-      - "traefik.http.routers.temporal-ui.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
-      - "traefik.http.services.temporal-ui.loadbalancer.server.port=8080"
+    image: temporalio/ui:2.34.0
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=https://${TRAEFIK_POSTIZ_HOST}
     networks:
-      - public-proxy
-      - temporal-internal
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
+      - temporal-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.temporalui.rule=Host(`${TRAEFIK_TEMPORAL_UI_HOST}`)"
+      - "traefik.http.routers.temporalui.entrypoints=websecure"
+      - "traefik.http.routers.temporalui.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.services.temporalui.loadbalancer.server.port=8080"
+      # TODO: ADD LABEL FOR BASIC AUTH
 
 networks:
-  public-proxy:
+  postiz-network:
+  temporal-network:
+  traefik-public:
     external: true
-    name: traefik-public
-  app-internal:
-    internal: true
-  temporal-internal:
-    internal: true
 
 volumes:
   postiz-db-data:
   postiz-redis-data:
+  postiz-config:
+  postiz-uploads:
   temporal-db-data:
   temporal-es-data:
