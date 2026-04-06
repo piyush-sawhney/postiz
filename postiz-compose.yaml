@@ -3,18 +3,23 @@ services:
     image: ghcr.io/gitroomhq/postiz-app:latest
     container_name: postiz
     restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.postiz.rule=Host(`${TRAEFIK_POSTIZ_HOST}`)"
+      - "traefik.http.routers.postiz.entrypoints=websecure"
+      - "traefik.http.routers.postiz.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.services.postiz.loadbalancer.server.port=5000"
     environment:
       # === Required Settings
-      MAIN_URL: '${MAIN_URL}'
-      FRONTEND_URL: '${FRONTEND_URL}'
-      NEXT_PUBLIC_BACKEND_URL: '${NEXT_PUBLIC_BACKEND_URL}'
+      MAIN_URL: 'https://${TRAEFIK_POSTIZ_HOST}'
+      FRONTEND_URL: 'https://${TRAEFIK_POSTIZ_HOST}'
+      NEXT_PUBLIC_BACKEND_URL: 'https://${TRAEFIK_POSTIZ_HOST}/api'
       JWT_SECRET: '${JWT_SECRET}'
       DATABASE_URL: 'postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postiz-postgres:5432/${POSTGRES_DB}'
       REDIS_URL: 'redis://postiz-redis:6379'
-      BACKEND_INTERNAL_URL: '${BACKEND_INTERNAL_URL}'
+      BACKEND_INTERNAL_URL: 'http://postiz:5000' # Aligned Port
       TEMPORAL_ADDRESS: "temporal:7233"
       IS_GENERAL: 'true'
-      # Security: Disable open registration in enterprise environments
       DISABLE_REGISTRATION: 'true' 
       RUN_CRON: 'true'
 
@@ -41,27 +46,24 @@ services:
       NX_ADD_PLUGINS: false
 
     volumes:
-      - postiz-config:/config/
-      - postiz-uploads:/uploads/
-    ports:
-      # Bind to localhost only. External traffic MUST flow through a Reverse Proxy (Nginx/Traefik) with TLS.
-      - "127.0.0.1:4007:5000"
+      - ./data/config:/config/
+      - ./data/uploads:/uploads/
     networks:
-      - postiz-network
-      - temporal-network
+      - public-proxy
+      - app-internal
+      - temporal-internal
     depends_on:
       postiz-postgres:
         condition: service_healthy
       postiz-redis:
+        condition: service_healthy
+      temporal:
         condition: service_healthy
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
     logging:
       driver: "json-file"
       options:
@@ -69,7 +71,7 @@ services:
         max-file: "10"
 
   postiz-postgres:
-    image: postgres:17-alpine
+    image: postgres:16-alpine # Standardized Version
     container_name: postiz-postgres
     restart: always
     environment:
@@ -77,186 +79,146 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - postgres-volume:/var/lib/postgresql/data
+      - postiz-db-data:/var/lib/postgresql/data
     networks:
-      - postiz-network
+      - app-internal
     healthcheck:
-      test: pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
-      timeout: 3s
-      retries: 3
+      timeout: 5s
+      retries: 5
     deploy:
       resources:
         limits:
           cpus: '1.0'
           memory: 1G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
   postiz-redis:
     image: redis:7.2-alpine
     container_name: postiz-redis
     restart: always
-    healthcheck:
-      test: redis-cli ping
-      interval: 10s
-      timeout: 3s
-      retries: 3
     volumes:
       - postiz-redis-data:/data
     networks:
-      - postiz-network
+      - app-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
     deploy:
       resources:
         limits:
           cpus: '0.5'
           memory: 512M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
-
-  spotlight:
-    pull_policy: always
-    container_name: spotlight
-    ports:
-      - "127.0.0.1:8969:8969/tcp"
-    image: ghcr.io/getsentry/spotlight:latest
-    networks:
-      - postiz-network
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
   temporal-elasticsearch:
+    image: elasticsearch:8.17.0
     container_name: temporal-elasticsearch
-    image: elasticsearch:7.17.27
     environment:
-      - cluster.routing.allocation.disk.threshold_enabled=true
-      - cluster.routing.allocation.disk.watermark.low=512mb
-      - cluster.routing.allocation.disk.watermark.high=256mb
-      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
-      - xpack.security.enabled=true # Security: Enabled authentication
+      - xpack.security.enabled=true
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-    networks:
-      - temporal-network
+      - xpack.license.self_generated.type=basic
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - cluster.routing.allocation.disk.threshold_enabled=true
     volumes:
-      - elasticsearch-data:/var/lib/elasticsearch/data
+      - temporal-es-data:/usr/share/elasticsearch/data
+    networks:
+      - temporal-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'status.*green\\|yellow'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 2G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
   temporal-postgresql:
-    container_name: temporal-postgresql
     image: postgres:16-alpine
+    container_name: temporal-postgresql
     environment:
       POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD}
       POSTGRES_USER: ${TEMPORAL_DB_USER}
-    networks:
-      - temporal-network
     volumes:
-      - temporal-postgresql-data:/var/lib/postgresql/data
+      - temporal-db-data:/var/lib/postgresql/data
+    networks:
+      - temporal-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEMPORAL_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     deploy:
       resources:
         limits:
           cpus: '1.0'
           memory: 1G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
   temporal:
+    image: temporalio/auto-setup:1.24.2 # Pinned Stable
     container_name: temporal
-    ports:
-      - '127.0.0.1:7233:7233'
-    image: temporalio/auto-setup:1.28.1
     depends_on:
-      - temporal-postgresql
-      - temporal-elasticsearch
+      temporal-postgresql:
+        condition: service_healthy
+      temporal-elasticsearch:
+        condition: service_healthy
     environment:
       - DB=postgres12
-      - DB_PORT=5432
       - POSTGRES_USER=${TEMPORAL_DB_USER}
       - POSTGRES_PWD=${TEMPORAL_DB_PASSWORD}
       - POSTGRES_SEEDS=temporal-postgresql
-      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/production-sql.yaml # Production Config
       - ENABLE_ES=true
       - ES_SEEDS=temporal-elasticsearch
       - ES_VERSION=v7
       - TEMPORAL_NAMESPACE=default
     networks:
-      - temporal-network
-    volumes:
-      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+      - temporal-internal
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health | grep SERVING"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
     deploy:
       resources:
         limits:
           cpus: '1.0'
           memory: 1G
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
-
-  temporal-admin-tools:
-    container_name: temporal-admin-tools
-    image: temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CLI_ADDRESS=temporal:7233
-    networks:
-      - temporal-network
-    stdin_open: true
-    depends_on:
-      - temporal
-    tty: true
 
   temporal-ui:
+    image: temporalio/ui:2.27.0
     container_name: temporal-ui
-    image: temporalio/ui:2.34.0
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.temporal-ui.rule=Host(`${TRAEFIK_TEMPORAL_HOST}`)"
+      - "traefik.http.routers.temporal-ui.entrypoints=websecure"
+      - "traefik.http.routers.temporal-ui.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.services.temporal-ui.loadbalancer.server.port=8080"
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=${MAIN_URL}
+      - TEMPORAL_CORS_ORIGINS=https://${TRAEFIK_POSTIZ_HOST}
     networks:
-      - temporal-network
-    ports:
-      - '127.0.0.1:8082:8080'
+      - public-proxy
+      - temporal-internal
     deploy:
       resources:
         limits:
           cpus: '0.5'
           memory: 512M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
 
 networks:
-  postiz-network:
-    driver: bridge
-  temporal-network:
-    driver: bridge
+  public-proxy:
+    external: true
+    name: traefik-public
+  app-internal:
+    internal: true
+  temporal-internal:
+    internal: true
+
+volumes:
+  postiz-db-data:
+  postiz-redis-data:
+  temporal-db-data:
+  temporal-es-data:
