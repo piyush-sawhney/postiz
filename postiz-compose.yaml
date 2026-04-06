@@ -2,41 +2,102 @@ services:
   postiz:
     image: ghcr.io/gitroomhq/postiz-app:latest
     container_name: postiz
-    security_opt:
-      - no-new-privileges:true
     restart: always
-    env_file: 
-      - path: ./default.env
-        required: true
-      - path: ./secrets.env
-        required: true
     environment:
-      IS_GENERAL: "true"
-      STORAGE_PROVIDER: "local"
-      UPLOAD_DIRECTORY: "/uploads"
-      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+      # === Required Settings
+      MAIN_URL: '${MAIN_URL}'
+      FRONTEND_URL: '${FRONTEND_URL}'
+      NEXT_PUBLIC_BACKEND_URL: '${NEXT_PUBLIC_BACKEND_URL}'
+      JWT_SECRET: '${JWT_SECRET}'
+      DATABASE_URL: 'postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postiz-postgres:5432/${POSTGRES_DB}'
+      REDIS_URL: 'redis://postiz-redis:6379'
+      BACKEND_INTERNAL_URL: '${BACKEND_INTERNAL_URL}'
+      TEMPORAL_ADDRESS: "temporal:7233"
+      IS_GENERAL: 'true'
+      # Security: Disable open registration in enterprise environments
+      DISABLE_REGISTRATION: 'true' 
+      RUN_CRON: 'true'
+
+      # === Storage Settings
+      STORAGE_PROVIDER: 'local'
+      UPLOAD_DIRECTORY: '/uploads'
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: '/uploads'
+
+      # === Social Media API Settings
+      X_API_KEY: '${X_API_KEY}'
+      X_API_SECRET: '${X_API_SECRET}'
+      LINKEDIN_CLIENT_ID: '${LINKEDIN_CLIENT_ID}'
+      LINKEDIN_CLIENT_SECRET: '${LINKEDIN_CLIENT_SECRET}'
+      FACEBOOK_APP_ID: '${FACEBOOK_APP_ID}'
+      FACEBOOK_APP_SECRET: '${FACEBOOK_APP_SECRET}'
+      YOUTUBE_CLIENT_ID: '${YOUTUBE_CLIENT_ID}'
+      YOUTUBE_CLIENT_SECRET: '${YOUTUBE_CLIENT_SECRET}'
+
+      # === Chrome Extension Settings
+      EXTENSION_ID: 'icpokdlcikdmemjkeoojhocmhmehpaia'
+
+      # === Misc Settings
+      API_LIMIT: 30
+      NX_ADD_PLUGINS: false
+
     volumes:
-      - ./config:/config/
-      - ./uploads:/uploads/
+      - postiz-config:/config/
+      - postiz-uploads:/uploads/
+    ports:
+      # Bind to localhost only. External traffic MUST flow through a Reverse Proxy (Nginx/Traefik) with TLS.
+      - "127.0.0.1:4007:5000"
     networks:
-      - traefik-public
       - postiz-network
-      - postgres-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=traefik-public"
-      - "traefik.http.routers.postiz-secure.entrypoints=websecure"
-      - "traefik.http.routers.postiz-secure.rule=Host(`${POSTIZ_DOMAIN?POSTIZ_DOMAIN is not set}`)"
-      - "traefik.http.routers.postiz-secure.tls=true"
-      - "traefik.http.routers.postiz-secure.tls.certresolver=${CERT_RESOLVER?CERT_RESOLVER is not set}"
-      - "traefik.http.routers.postiz-secure.service=postiz"
-      - "traefik.http.services.postiz.loadbalancer.server.port=5000"
+      - temporal-network
     depends_on:
+      postiz-postgres:
+        condition: service_healthy
       postiz-redis:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  postiz-postgres:
+    image: postgres:17-alpine
+    container_name: postiz-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-volume:/var/lib/postgresql/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
 
   postiz-redis:
-    image: redis:7.2
+    image: redis:7.2-alpine
     container_name: postiz-redis
     restart: always
     healthcheck:
@@ -45,14 +106,157 @@ services:
       timeout: 3s
       retries: 3
     volumes:
-      - ./redis:/data
+      - postiz-redis-data:/data
     networks:
       - postiz-network
- 
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  spotlight:
+    pull_policy: always
+    container_name: spotlight
+    ports:
+      - "127.0.0.1:8969:8969/tcp"
+    image: ghcr.io/getsentry/spotlight:latest
+    networks:
+      - postiz-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  temporal-elasticsearch:
+    container_name: temporal-elasticsearch
+    image: elasticsearch:7.17.27
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=true # Security: Enabled authentication
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+    networks:
+      - temporal-network
+    volumes:
+      - elasticsearch-data:/var/lib/elasticsearch/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  temporal-postgresql:
+    container_name: temporal-postgresql
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${TEMPORAL_DB_PASSWORD}
+      POSTGRES_USER: ${TEMPORAL_DB_USER}
+    networks:
+      - temporal-network
+    volumes:
+      - temporal-postgresql-data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  temporal:
+    container_name: temporal
+    ports:
+      - '127.0.0.1:7233:7233'
+    image: temporalio/auto-setup:1.28.1
+    depends_on:
+      - temporal-postgresql
+      - temporal-elasticsearch
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${TEMPORAL_DB_USER}
+      - POSTGRES_PWD=${TEMPORAL_DB_PASSWORD}
+      - POSTGRES_SEEDS=temporal-postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=true
+      - ES_SEEDS=temporal-elasticsearch
+      - ES_VERSION=v7
+      - TEMPORAL_NAMESPACE=default
+    networks:
+      - temporal-network
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
+  temporal-admin-tools:
+    container_name: temporal-admin-tools
+    image: temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    networks:
+      - temporal-network
+    stdin_open: true
+    depends_on:
+      - temporal
+    tty: true
+
+  temporal-ui:
+    container_name: temporal-ui
+    image: temporalio/ui:2.34.0
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=${MAIN_URL}
+    networks:
+      - temporal-network
+    ports:
+      - '127.0.0.1:8082:8080'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+
 networks:
-  traefik-public:
-    external: true
-  postgres-network:
-    external: true
   postiz-network:
-    external: false
+    driver: bridge
+  temporal-network:
+    driver: bridge
